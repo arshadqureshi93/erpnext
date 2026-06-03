@@ -439,6 +439,59 @@ class TestSalesOrder(ERPNextTestSuite):
 		dn.cancel()
 		self.assertEqual(get_reserved_qty(), existing_reserved_qty + 10)
 
+	def test_make_delivery_note_respects_over_delivery_allowance(self):
+		"""make_delivery_note must include fully-delivered SO lines when
+		over_delivery_receipt_allowance permits further delivery.
+
+		Regression test for #55590 (sales-cycle equivalent of #55246; PR #55247).
+		"""
+		make_stock_entry(target="_Test Warehouse - _TC", qty=20, rate=100)
+
+		# 50% tolerance — 10 ordered allows up to 15 delivered
+		frappe.db.set_value("Item", "_Test Item", "over_delivery_receipt_allowance", 50)
+		try:
+			so = make_sales_order()
+			create_dn_against_so(so.name, 10)
+
+			so.load_from_db()
+			self.assertEqual(so.get("items")[0].delivered_qty, 10)
+
+			# onload must flag pending deliverable qty so the UI keeps the
+			# "Create > Delivery Note" button visible even at per_delivered = 100
+			so.run_method("onload")
+			self.assertTrue(
+				so.get_onload("has_pending_deliverable_qty"),
+				"onload should flag pending deliverable qty while tolerance is available",
+			)
+
+			# Re-mapping the same SO must yield a DN with the row present
+			# and qty pre-filled to the remaining tolerance (15 - 10 = 5)
+			dn = make_delivery_note(so.name)
+			self.assertEqual(
+				len(dn.get("items")), 1, "Fully-delivered row dropped despite available tolerance"
+			)
+			self.assertEqual(dn.get("items")[0].item_code, "_Test Item")
+			self.assertEqual(dn.get("items")[0].qty, 5)
+			self.assertEqual(dn.get("items")[0].so_detail, so.get("items")[0].name)
+
+			# Tolerance exhausted → row must be filtered out as before
+			create_dn_against_so(so.name, 5)
+			so.load_from_db()
+			self.assertEqual(so.get("items")[0].delivered_qty, 15)
+
+			so.run_method("onload")
+			self.assertFalse(
+				so.get_onload("has_pending_deliverable_qty"),
+				"onload should clear pending deliverable flag once tolerance is exhausted",
+			)
+
+			dn_empty = make_delivery_note(so.name)
+			self.assertEqual(
+				len(dn_empty.get("items")), 0, "Row should be dropped once tolerance is exhausted"
+			)
+		finally:
+			frappe.db.set_value("Item", "_Test Item", "over_delivery_receipt_allowance", 0)
+
 	def test_reserved_qty_for_over_delivery_via_sales_invoice(self):
 		make_stock_entry(target="_Test Warehouse - _TC", qty=10, rate=100)
 

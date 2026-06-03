@@ -1077,7 +1077,7 @@ erpnext.selling.SalesOrderController = class SalesOrderController extends erpnex
 
 					// delivery note
 					if (
-						flt(doc.per_delivered) < 100 &&
+						(flt(doc.per_delivered) < 100 || doc.__onload?.has_pending_deliverable_qty) &&
 						(order_is_a_sale || order_is_a_custom_sale) &&
 						allow_delivery
 					) {

@@ -23,6 +23,7 @@ from erpnext.accounts.doctype.sales_invoice.sales_invoice import (
 )
 from erpnext.accounts.party import get_party_account
 from erpnext.controllers.selling_controller import SellingController
+from erpnext.controllers.status_updater import get_allowance_for
 from erpnext.manufacturing.doctype.blanket_order.blanket_order import (
 	validate_against_blanket_order,
 )
@@ -227,6 +228,8 @@ class SalesOrder(SellingController):
 		if has_reserved_stock(self.doctype, self.name):
 			self.set_onload("has_reserved_stock", True)
 
+		self.set_onload("has_pending_deliverable_qty", self.has_pending_deliverable_qty())
+
 	def can_update_items(self) -> bool:
 		result = True
 
@@ -235,6 +238,19 @@ class SalesOrder(SellingController):
 				result = False
 
 		return result
+
+	def has_pending_deliverable_qty(self) -> bool:
+		"""Return True if any non-drop-ship item can still be delivered,
+		considering the configured over_delivery_receipt_allowance.
+		"""
+		for item in self.get("items", []):
+			if item.delivered_by_supplier:
+				continue
+			tolerance = flt(get_allowance_for(item.item_code, qty_or_amount="qty")[0])
+			max_deliverable_qty = flt(item.qty) * (100 + tolerance) / 100
+			if abs(flt(item.delivered_qty)) < abs(max_deliverable_qty):
+				return True
+		return False
 
 	def before_validate(self):
 		self.set_has_unit_price_items()
@@ -1308,6 +1324,10 @@ def make_delivery_note(
 
 		make_packing_list(target)
 
+	def get_max_deliverable_qty(source):
+		tolerance = flt(get_allowance_for(source.item_code, qty_or_amount="qty")[0])
+		return flt(source.qty) * (100 + tolerance) / 100
+
 	def condition(doc):
 		if doc.name in sre_details:
 			del sre_details[doc.name]
@@ -1322,15 +1342,23 @@ def make_delivery_note(
 				return False
 
 		return (
-			(abs(doc.delivered_qty) < abs(doc.qty)) or is_unit_price_row(doc)
+			is_unit_price_row(doc) or abs(doc.delivered_qty) < abs(get_max_deliverable_qty(doc))
 		) and doc.delivered_by_supplier != 1
 
 	def update_item(source, target, source_parent):
-		target.base_amount = (flt(source.qty) - flt(source.delivered_qty)) * flt(source.base_rate)
-		target.amount = (flt(source.qty) - flt(source.delivered_qty)) * flt(source.rate)
-		target.qty = (
-			flt(source.qty) if is_unit_price_row(source) else flt(source.qty) - flt(source.delivered_qty)
-		)
+		delivered_qty = flt(source.delivered_qty)
+		qty = flt(source.qty)
+		pending_qty = qty - delivered_qty
+
+		if is_unit_price_row(source):
+			target.qty = qty
+		elif pending_qty > 0:
+			target.qty = pending_qty
+		else:
+			target.qty = max(get_max_deliverable_qty(source) - delivered_qty, 0)
+
+		target.amount = target.qty * flt(source.rate)
+		target.base_amount = target.qty * flt(source.base_rate)
 
 		item = get_item_defaults(target.item_code, source_parent.company)
 		item_group = get_item_group_defaults(target.item_code, source_parent.company)
